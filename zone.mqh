@@ -8,6 +8,21 @@
 //+------------------------------------------------------------------+
 //| defines                                                          |
 //+------------------------------------------------------------------+
+// ==== Struct lưu thông tin vùng ====
+struct Zone
+{
+   string name;
+   datetime time1;
+   datetime time2;
+   double high;
+   double low;
+   int candleCount;
+};
+
+Zone zones[];                 // Mảng lưu các vùng
+int zoneCounter = 0;          // Đếm vùng
+datetime lastCheckedTime = 0; // Đảm bảo mỗi nến chỉ xử lý 1 lần
+
 
 bool detect_zone(int barIndex, int lookback, double maxRange, datetime &zoneStartTime, datetime &zoneEndTime, double &high, double &low)
 {
@@ -33,50 +48,27 @@ bool detect_zone(int barIndex, int lookback, double maxRange, datetime &zoneStar
    return false;
 }
 
-
-// void markRecentAccumulationZones_2(int lookback = 20, double maxRangePip = 30, int maxCandlesToScan = 200)
-// {
-//    double pointSize;
-//    SymbolInfoDouble(_Symbol, SYMBOL_POINT, pointSize);
-//    double maxRange = maxRangePip * pointSize;
-
-//    int totalBars = iBars(_Symbol, _Period);
-//    int scanLimit = (maxCandlesToScan < totalBars - lookback - 1) ? maxCandlesToScan : totalBars - lookback - 1;
-
-//    datetime lastZoneTime = 0;
-//    int static zoneCounter = 0;
-
-//    for (int i = 1; i <= scanLimit; i++)
-//    {
-//       datetime t1, t2;
-//       double hi, lo;
-
-//       if (detect_zone(i, lookback, maxRange, t1, t2, hi, lo))
-//       {
-//          if (MathAbs(t1 - lastZoneTime) < PeriodSeconds(_Period) * lookback)
-//             continue;
-
-//          string name = "accum_zone_" + IntegerToString(zoneCounter++);
-//          draw_zone(name, t1, t2, hi, lo);
-
-//          lastZoneTime = t1;
-//       }
-//    }
-// }
-
-// ==== Struct lưu thông tin vùng ====
-struct Zone
+int countCandlesInsideZone(datetime time1, datetime time2, double zoneHigh, double zoneLow)
 {
-   string name;
-   datetime time1;
-   datetime time2;
-   double high;
-   double low;
-};
+   int count = 0;
+   int totalBars = Bars(_Symbol, _Period);
 
-Zone zones[];                 // Mảng lưu các vùng
-int zoneCounter = 0;          // Đếm vùng
-datetime lastCheckedTime = 0; // Đảm bảo mỗi nến chỉ xử lý 1 lần
+   for (int i = 0; i < totalBars; i++)
+   {
+      datetime t = iTime(_Symbol, _Period, i);
+      if (t < time1) break;
+      if (t > time2) continue;
+
+      double high = iHigh(_Symbol, _Period, i);
+      double low  = iLow(_Symbol, _Period, i);
+
+      if (high <= zoneHigh && low >= zoneLow)
+         count++;
+   }
+
+   return count;
+}
+
 
 // ==== Hàm kiểm tra xem có vùng nào chồng lặp không ====
 int find_overlapping_zone(double high, double low, datetime t1, datetime t2, double priceTolerance)
@@ -129,10 +121,63 @@ bool isCandleInsideZone(int barIndex, double zoneHigh, double zoneLow)
    return (high <= zoneHigh && low >= zoneLow);
 }
 
-// ==== Hàm phát hiện & vẽ zone duy nhất bạn cần gọi trong OnTick() ====
-void detect_and_draw_zone()
+void createNewZone(string name, datetime t1, datetime t2, double hi, double lo)
+{
+   draw_zone(name, t1, t2, hi, lo);
+
+   Zone z;
+   z.name = name;
+   z.time1 = t1;
+   z.time2 = t2;
+   z.high = hi;
+   z.low = lo;
+   z.candleCount = countCandlesInsideZone(t1, t2, hi, lo);
+
+   ArrayResize(zones, ArraySize(zones) + 1);
+   zones[ArraySize(zones) - 1] = z;
+
+   Print("Zone created: ", name);
+   Print("Zone candleCount: ", z.candleCount);
+}
+
+void updateExistingZone(int idx, double hi, double lo)
+{
+   zones[idx].high = hi;
+   zones[idx].low = lo;
+   zones[idx].candleCount = countCandlesInsideZone(zones[idx].time1, zones[idx].time2, hi, lo);
+
+   draw_zone(zones[idx].name, zones[idx].time1, zones[idx].time2, hi, lo);
+
+   Print("Zone updated: ", zones[idx].name);
+   Print("Zone candleCount: ", zones[idx].candleCount);
+}
+
+void expandZoneWithCandle(int idx)
 {
    datetime candleTime = iTime(_Symbol, _Period, 1);
+   double candleHigh = iHigh(_Symbol, _Period, 1);
+   double candleLow  = iLow(_Symbol, _Period, 1);
+
+   double newHigh = MathMax(zones[idx].high, candleHigh);
+   double newLow  = MathMin(zones[idx].low, candleLow);
+
+   if (candleTime < zones[idx].time1)
+      zones[idx].time1 = candleTime;
+   if (candleTime > zones[idx].time2)
+      zones[idx].time2 = candleTime;
+
+   zones[idx].high = newHigh;
+   zones[idx].low = newLow;
+   zones[idx].candleCount = countCandlesInsideZone(zones[idx].time1, zones[idx].time2, newHigh, newLow);
+
+   draw_zone(zones[idx].name, zones[idx].time1, zones[idx].time2, newHigh, newLow);
+
+   Print("Zone expanded to include candle at ", TimeToString(candleTime));
+   Print("Zone candleCount: ", zones[idx].candleCount);
+}
+
+void processZoneDetection()
+{
    int lookback = 20;
    double maxRangePip = 30;
    int scanBar = 2;
@@ -140,11 +185,6 @@ void detect_and_draw_zone()
    double pointSize;
    SymbolInfoDouble(_Symbol, SYMBOL_POINT, pointSize);
    double maxRange = maxRangePip * pointSize;
-
-   if (candleTime == lastCheckedTime)
-      return;
-
-   lastCheckedTime = candleTime;
 
    if (Bars(_Symbol, _Period) < scanBar + lookback)
       return;
@@ -154,58 +194,36 @@ void detect_and_draw_zone()
 
    if (detect_zone(scanBar, lookback, maxRange, t1, t2, hi, lo))
    {
-      int idx = find_overlapping_zone(hi, lo, t1, t2, 5 * pointSize); // tolerance 5 pips
+      int idx = find_overlapping_zone(hi, lo, t1, t2, 5 * pointSize);
 
       if (idx >= 0)
-      {
-         draw_zone(zones[idx].name, t1, t2, hi, lo);
-         zones[idx].time1 = t1;
-         zones[idx].time2 = t2;
-         zones[idx].high = hi;
-         zones[idx].low = lo;
-         Print("Zone updated: ", zones[idx].name);
-      }
+         updateExistingZone(idx, hi, lo);
       else
       {
          string name = "accum_zone_" + IntegerToString(zoneCounter++);
-         draw_zone(name, t1, t2, hi, lo);
-      
-         Zone z;
-         z.name = name;
-         z.time1 = t1;
-         z.time2 = t2;
-         z.high = hi;
-         z.low = lo;
-         ArrayResize(zones, ArraySize(zones) + 1);
-         zones[ArraySize(zones) - 1] = z;
-      
-         Print("Zone created: ", name);
+         createNewZone(name, t1, t2, hi, lo);
       }
-      
+
       if (isCandleInsideZone(1, hi, lo))
       {
-         Print("Candle is inside the zone: ", TimeToString(candleTime));
-      
-         double candleHigh = iHigh(_Symbol, _Period, 1);
-         double candleLow  = iLow(_Symbol, _Period, 1);
-      
-         double newHigh = MathMax(hi, candleHigh);
-         double newLow  = MathMin(lo, candleLow);
-      
+         Print("Candle is inside the zone: ", TimeToString(iTime(_Symbol, _Period, 1)));
          if (idx >= 0)
-         {
-            zones[idx].high = newHigh;
-            zones[idx].low = newLow;
-      
-            draw_zone(zones[idx].name, zones[idx].time1, zones[idx].time2, newHigh, newLow);
-            Print("Zone expanded to include candle at ", TimeToString(candleTime));
-         }
+            expandZoneWithCandle(idx);
       }
       else
-      {
-         Print("Candle is outside the zone: ", TimeToString(candleTime));
-      }
-      
+         Print("Candle is outside the zone: ", TimeToString(iTime(_Symbol, _Period, 1)));
    }
 }
+
+void detect_and_draw_zone()
+{
+   datetime candleTime = iTime(_Symbol, _Period, 1);
+   if (candleTime == lastCheckedTime)
+      return;
+
+   lastCheckedTime = candleTime;
+   processZoneDetection();
+}
+
+
 
